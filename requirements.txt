@@ -1,0 +1,25 @@
+# Web fetching & HTML parsing
+requests>=2.31.0
+beautifulsoup4>=4.12.0
+lxml>=5.0.0
+
+# PDF text extraction
+pdfplumber>=0.10.0
+pypdf>=4.0.0
+
+# Vector search (SQLite extension, pure-Python fallback included)
+sqlite-vec>=0.1.0
+
+# Numerical / data handling
+numpy>=1.24.0
+
+# LLM clients (configurable — install whichever providers you'll use)
+openai>=1.30.0          # OpenAI / OpenAI-compatible endpoints
+anthropic>=0.30.0       # Anthropic Claude
+# google-generativeai>=0.5.0   # Google Gemini (uncomment if needed)
+
+# Frontend
+streamlit>=1.35.0
+
+# Embedding model wrappers (only needed if you choose a non-OpenAI embedding)
+# sentence-transformers>=2.7.0   # for local embeddings via Ollama/HF
