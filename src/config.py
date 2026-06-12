@@ -78,15 +78,33 @@ MINIMAX_BASE_URL = os.getenv("MINIMAX_BASE_URL", "")
 # ----------------------------------------------------------------------------
 # Embedding provider
 # ----------------------------------------------------------------------------
-# Default MiniMax embo-01 is 1536-dim (set EMBEDDING_DIM in .env if your
-# model differs).
-EMBEDDING_PROVIDER = os.getenv("EMBEDDING_PROVIDER", "minimax")
-EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "embo-01")
+# Pick one of: "openai", "minimax", "jina"
+# All three plug into the same interface in src/embed.py. Switching provider
+# means setting EMBEDDING_PROVIDER and re-running the ingest.
+# IMPORTANT: EMBEDDING_DIM must match the provider's model — sqlite-vec stores
+# vectors as fixed-size float arrays, so a different dim = different table.
+EMBEDDING_PROVIDER = os.getenv("EMBEDDING_PROVIDER", "openai").lower()
+EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
 EMBEDDING_DIM = int(os.getenv("EMBEDDING_DIM", "1536"))
 
-# MiniMax embedding
+# OpenAI (default)
+# text-embedding-3-small: 1536-dim, $0.02/1M tokens, ~$0.07 for our 62-PDF corpus
+# text-embedding-3-large: 3072-dim, $0.13/1M tokens, higher quality
+OPENAI_EMBEDDING_MODEL = os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
+OPENAI_EMBEDDING_DIM = int(os.getenv("OPENAI_EMBEDDING_DIM", "1536"))
+
+# MiniMax
+# embo-01: 1536-dim, free with MiniMax M-series key, requires VPN-free access
 MINIMAX_EMBEDDING_MODEL = os.getenv("MINIMAX_EMBEDDING_MODEL", "embo-01")
 MINIMAX_EMBEDDING_DIM = int(os.getenv("MINIMAX_EMBEDDING_DIM", "1536"))
+
+# Jina AI (jina.ai)
+# jina-embeddings-v3: 1024-dim (default), supports 32k tokens, multilingual
+# Free tier: 1M tokens/month. Pro: $0.02/1M tokens.
+JINA_API_KEY = os.getenv("JINA_API_KEY", "")
+JINA_EMBEDDING_MODEL = os.getenv("JINA_EMBEDDING_MODEL", "jina-embeddings-v3")
+JINA_EMBEDDING_DIM = int(os.getenv("JINA_EMBEDDING_DIM", "1024"))
+JINA_BASE_URL = os.getenv("JINA_BASE_URL", "https://api.jina.ai/v1")
 
 # ----------------------------------------------------------------------------
 # Retrieval

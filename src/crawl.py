@@ -170,14 +170,67 @@ def run(limit: int | None = None, reingest: bool = False) -> None:
              s["guidelines"], s["chunks"], s["vec_chunks"])
 
 
+def reembed_all() -> None:
+    """
+    Re-embed all existing chunks in the database with the CURRENT provider.
+    Use this when:
+      - You switch EMBEDDING_PROVIDER in .env (e.g. minimax -> openai)
+      - You change EMBEDDING_MODEL within a provider
+      - The vec_chunks table was dropped by init_db() due to a dim change
+
+    This does NOT re-download or re-chunk anything. It just re-runs the
+    embedding call for every existing chunk and replaces the vec_chunks rows.
+    """
+    from .db import clear_vec_chunks, get_chunk_id_to_row_mapping, insert_vecs_bulk
+    from .embed import embed_texts, get_provider
+
+    provider = get_provider()
+    log.info("Re-embedding all chunks with provider=%s (dim=%d)",
+             provider.name, provider.dim)
+
+    init_db()  # drops + recreates vec_chunks if dim changed
+
+    with connect() as conn:
+        chunk_rows = get_chunk_id_to_row_mapping(conn)
+        if not chunk_rows:
+            log.warning("No chunks in DB. Run the full crawl first.")
+            return
+
+        log.info("Found %d chunks to re-embed", len(chunk_rows))
+        clear_vec_chunks(conn)
+
+        # Embed in batches of 96 to avoid rate limits
+        BATCH = 96
+        t0 = time.time()
+        for i in range(0, len(chunk_rows), BATCH):
+            batch = chunk_rows[i : i + BATCH]
+            texts = [r["text"] for r in batch]
+            vecs = embed_texts(texts)
+            insert_vecs_bulk(conn, [(r["chunk_id"], v) for r, v in zip(batch, vecs)])
+            log.info("  embedded %d / %d chunks", min(i + BATCH, len(chunk_rows)), len(chunk_rows))
+
+        conn.commit()
+        elapsed = time.time() - t0
+        log.info("Re-embed done in %.1fs", elapsed)
+        s = stats(conn)
+        log.info("DB now holds: %d guidelines, %d chunks, %d vectors",
+                 s["guidelines"], s["chunks"], s["vec_chunks"])
+
+
 def main():
     p = argparse.ArgumentParser(description="Crawl IA HK guidelines and ingest into the DB")
     p.add_argument("--limit", type=int, default=None, help="Process only the first N guidelines")
     p.add_argument("--reingest", action="store_true", help="Wipe existing data before ingesting")
+    p.add_argument("--reembed-only", action="store_true",
+                   help="Re-embed existing chunks with the current EMBEDDING_PROVIDER "
+                        "(no PDF re-download, no re-chunking). Use after switching providers.")
     p.add_argument("--verbose", "-v", action="store_true")
     args = p.parse_args()
     setup_logging("DEBUG" if args.verbose else "INFO")
-    run(limit=args.limit, reingest=args.reingest)
+    if args.reembed_only:
+        reembed_all()
+    else:
+        run(limit=args.limit, reingest=args.reingest)
 
 
 if __name__ == "__main__":

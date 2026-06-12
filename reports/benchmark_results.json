@@ -1,0 +1,101 @@
+[
+  {
+    "provider": "minimax",
+    "model": "text-embo-01",
+    "avg_recall_at_5": 0.717,
+    "top1_accuracy": 0.4,
+    "avg_first_relevant_rank": 2.3,
+    "queries": [
+      {
+        "query": "What is the required audit frequency for AML compliance?",
+        "score": {
+          "recall_at_5": 1.0,
+          "top1_relevant": true,
+          "first_relevant_rank": 1
+        },
+        "top1_code": "GL3"
+      },
+      {
+        "query": "List the controls expected for customer due diligence",
+        "score": {
+          "recall_at_5": 1.0,
+          "top1_relevant": false,
+          "first_relevant_rank": 2
+        },
+        "top1_code": "GL16"
+      },
+      {
+        "query": "What are the requirements for outsourcing by insurers?",
+        "score": {
+          "recall_at_5": 1.0,
+          "top1_relevant": false,
+          "first_relevant_rank": 2
+        },
+        "top1_code": "GL32"
+      },
+      {
+        "query": "Cybersecurity controls for insurance companies",
+        "score": {
+          "recall_at_5": 1.0,
+          "top1_relevant": true,
+          "first_relevant_rank": 1
+        },
+        "top1_code": "GL20"
+      },
+      {
+        "query": "Enterprise risk management requirements",
+        "score": {
+          "recall_at_5": 1.0,
+          "top1_relevant": true,
+          "first_relevant_rank": 1
+        },
+        "top1_code": "GL21"
+      },
+      {
+        "query": "Continuing professional development for insurance intermediaries",
+        "score": {
+          "recall_at_5": 0.0,
+          "top1_relevant": false,
+          "first_relevant_rank": 5
+        },
+        "top1_code": "GL27"
+      },
+      {
+        "query": "Underwriting requirements for long term insurance business",
+        "score": {
+          "recall_at_5": 0.5,
+          "top1_relevant": false,
+          "first_relevant_rank": 3
+        },
+        "top1_code": "GL5"
+      },
+      {
+        "query": "Corporate governance of authorized insurers",
+        "score": {
+          "recall_at_5": 1.0,
+          "top1_relevant": true,
+          "first_relevant_rank": 1
+        },
+        "top1_code": "GL10"
+      },
+      {
+        "query": "Record keeping requirements for insurance intermediaries",
+        "score": {
+          "recall_at_5": 0.0,
+          "top1_relevant": false,
+          "first_relevant_rank": 5
+        },
+        "top1_code": "GL28"
+      },
+      {
+        "query": "Solvency and capital requirements",
+        "score": {
+          "recall_at_5": 0.67,
+          "top1_relevant": false,
+          "first_relevant_rank": 2
+        },
+        "top1_code": "GL21"
+      }
+    ]
+  }
+]

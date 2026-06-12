@@ -149,11 +149,41 @@ CREATE INDEX IF NOT EXISTS idx_query_log_asked_at ON query_log(asked_at);
 
 
 def init_db() -> None:
-    """Create tables if they don't exist."""
+    """
+    Create tables if they don't exist.
+
+    Special handling for vec_chunks: if the existing virtual table was created
+    with a different EMBEDDING_DIM than the current config, drop and recreate
+    it. This lets you swap embedding providers (OpenAI 1536 <-> Jina 1024 <-> 
+    OpenAI 3072) without manual SQL. NOTE: dropping vec_chunks loses the
+    vectors; you must re-run the crawl to re-embed.
+    """
     with connect() as conn:
         conn.executescript(SCHEMA)
+        # Check if existing vec_chunks has a different dim
+        try:
+            row = conn.execute(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='vec_chunks'"
+            ).fetchone()
+            if row and row[0]:
+                # The SQL contains "float[N]" — extract N
+                import re
+                m = re.search(r"float\[(\d+)\]", row[0])
+                if m:
+                    existing_dim = int(m.group(1))
+                    if existing_dim != EMBEDDING_DIM:
+                        log.warning(
+                            "vec_chunks was created with dim=%d but EMBEDDING_DIM=%d. "
+                            "Dropping and recreating. You will need to re-run the crawl "
+                            "to re-embed the corpus with the new provider.",
+                            existing_dim, EMBEDDING_DIM,
+                        )
+                        conn.execute("DROP TABLE vec_chunks")
+                        conn.executescript(SCHEMA)
+        except Exception as e:
+            log.debug("vec_chunks dim check skipped: %s", e)
         conn.commit()
-    log.info("DB initialized at %s", DB_PATH)
+    log.info("DB initialized at %s (vec dim=%d)", DB_PATH, EMBEDDING_DIM)
 
 
 # ---------------------------------------------------------------------------
