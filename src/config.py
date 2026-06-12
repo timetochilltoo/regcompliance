@@ -68,11 +68,15 @@ MINIMAX_BASE_URL = os.getenv("MINIMAX_BASE_URL", "")
 # ----------------------------------------------------------------------------
 # Embedding provider
 # ----------------------------------------------------------------------------
-# For 100 PDFs, "openai" with text-embedding-3-small is the easiest.
-# Cost is roughly $0.10 one-time for the whole corpus.
-EMBEDDING_PROVIDER = os.getenv("EMBEDDING_PROVIDER", "openai")
-EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
-EMBEDDING_DIM = int(os.getenv("EMBEDDING_DIM", "1536"))  # 1536 for the small model
+# Default MiniMax embo-01 is 1536-dim (set EMBEDDING_DIM in .env if your
+# model differs).
+EMBEDDING_PROVIDER = os.getenv("EMBEDDING_PROVIDER", "minimax")
+EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "embo-01")
+EMBEDDING_DIM = int(os.getenv("EMBEDDING_DIM", "1536"))
+
+# MiniMax embedding
+MINIMAX_EMBEDDING_MODEL = os.getenv("MINIMAX_EMBEDDING_MODEL", "embo-01")
+MINIMAX_EMBEDDING_DIM = int(os.getenv("MINIMAX_EMBEDDING_DIM", "1536"))
 
 # ----------------------------------------------------------------------------
 # Retrieval
