@@ -227,55 +227,72 @@ def _detect_section_at(page_text: str, char_offset: int) -> tuple[str, str]:
 # Embeddings
 # ---------------------------------------------------------------------------
 
-def _get_openai_compatible_client(api_key: str, base_url: Optional[str] = None):
-    """Return an OpenAI client pointed at any OpenAI-API-compatible endpoint."""
-    from openai import OpenAI
-    kwargs = {"api_key": api_key}
-    if base_url:
-        kwargs["base_url"] = base_url
-    return OpenAI(**kwargs)
-
-
-def _provider_config() -> tuple[str, str, str]:
+def _provider_config() -> tuple[str, str]:
     """
-    Return (provider_name, api_key, model_name) for the configured embedding
-    provider. Raises if the provider isn't wired up.
+    Return (provider_name, api_key) for the configured embedding provider.
+    Raises if the provider isn't wired up.
     """
-    from .config import MINIMAX_API_KEY, MINIMAX_BASE_URL, MINIMAX_EMBEDDING_MODEL
+    from .config import MINIMAX_API_KEY
 
     if EMBEDDING_PROVIDER == "minimax":
         if not MINIMAX_API_KEY:
             raise RuntimeError(
                 "MINIMAX_API_KEY is not set. Add it to your .env file."
             )
-        return ("minimax", MINIMAX_API_KEY, MINIMAX_EMBEDDING_MODEL)
+        return ("minimax", MINIMAX_API_KEY)
     if EMBEDDING_PROVIDER == "openai":
         if not OPENAI_API_KEY:
             raise RuntimeError(
                 "OPENAI_API_KEY is not set. Add it to your .env file."
             )
-        return ("openai", OPENAI_API_KEY, EMBEDDING_MODEL)
+        return ("openai", OPENAI_API_KEY)
     raise NotImplementedError(
         f"Embedding provider '{EMBEDDING_PROVIDER}' is not wired up yet. "
         "Supported: 'openai', 'minimax'."
     )
 
 
-def embed_texts(texts: List[str], model: Optional[str] = None) -> List[List[float]]:
+def _minimax_embed(texts: List[str], embed_type: str = "db") -> List[List[float]]:
     """
-    Embed a batch of strings. Returns one vector per input string.
+    Direct HTTP call to MiniMax's /v1/embeddings endpoint.
+    The MiniMax API is NOT OpenAI-compatible for embeddings — it uses 'texts'
+    instead of 'input' and requires a 'type' field ('db' for document chunks,
+    'query' for user queries).
     """
-    provider, api_key, default_model = _provider_config()
-    model = model or default_model
+    import requests
+    from .config import MINIMAX_API_KEY, MINIMAX_BASE_URL, MINIMAX_EMBEDDING_MODEL
 
-    from .config import MINIMAX_BASE_URL
-    base_url = MINIMAX_BASE_URL if provider == "minimax" else OPENAI_BASE_URL
-    client = _get_openai_compatible_client(api_key, base_url)
+    url = f"{MINIMAX_BASE_URL.rstrip('/')}/embeddings"
+    payload = {
+        "model": MINIMAX_EMBEDDING_MODEL,
+        "texts": texts,
+        "type": embed_type,
+    }
+    headers = {
+        "Authorization": f"Bearer {MINIMAX_API_KEY}",
+        "Content-Type": "application/json",
+    }
+    resp = requests.post(url, json=payload, headers=headers, timeout=60)
+    resp.raise_for_status()
+    data = resp.json()
 
-    log.info("Embedding %d chunks with %s (provider=%s, dim=%d)",
-             len(texts), model, provider, EMBEDDING_DIM)
+    base_resp = data.get("base_resp", {})
+    if base_resp.get("status_code", 0) != 0:
+        # If 'query' type failed, try 'db' as fallback
+        if embed_type == "query":
+            log.warning("MiniMax query embedding failed, retrying with type=db")
+            return _minimax_embed(texts, embed_type="db")
+        raise RuntimeError(
+            f"MiniMax embedding failed: status_code={base_resp.get('status_code')} "
+            f"status_msg={base_resp.get('status_msg')} body={data}"
+        )
+    return data["vectors"]
 
-    # The OpenAI API caps batch size; chunk to be safe.
+
+def _openai_embed(texts: List[str], model: str) -> List[List[float]]:
+    """Standard OpenAI embeddings call via the openai SDK."""
+    from openai import OpenAI
+    client = OpenAI(api_key=OPENAI_API_KEY, base_url=OPENAI_BASE_URL)
     BATCH = 96
     all_vectors: List[List[float]] = []
     for i in range(0, len(texts), BATCH):
@@ -286,6 +303,25 @@ def embed_texts(texts: List[str], model: Optional[str] = None) -> List[List[floa
     return all_vectors
 
 
+def embed_texts(texts: List[str], embed_type: str = "db") -> List[List[float]]:
+    """
+    Embed a batch of strings. Returns one vector per input string.
+    `embed_type` is only used by MiniMax ('db' for documents, 'query' for queries).
+    """
+    provider, _ = _provider_config()
+    log.info("Embedding %d chunks with provider=%s type=%s (dim=%d)",
+             len(texts), provider, embed_type, EMBEDDING_DIM)
+
+    if provider == "minimax":
+        return _minimax_embed(texts, embed_type=embed_type)
+    if provider == "openai":
+        return _openai_embed(texts, model=EMBEDDING_MODEL)
+    raise NotImplementedError(f"Provider {provider} not implemented")
+
+
 def embed_query(text: str) -> List[float]:
-    """Embed a single query string."""
+    """Embed a single user query. Uses type='query' for MiniMax (with db fallback)."""
+    provider, _ = _provider_config()
+    if provider == "minimax":
+        return _minimax_embed([text], embed_type="query")[0]
     return embed_texts([text])[0]

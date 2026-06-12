@@ -9,6 +9,16 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+# Load .env from the project root (one level up from src/) so that API keys
+# are visible to os.getenv(). Safe to call multiple times.
+try:
+    from dotenv import load_dotenv
+    _env_path = Path(__file__).resolve().parent.parent / ".env"
+    if _env_path.exists():
+        load_dotenv(_env_path, override=False)
+except ImportError:
+    pass  # python-dotenv not installed; assume env vars are set externally
+
 # ----------------------------------------------------------------------------
 # Paths
 # ----------------------------------------------------------------------------
