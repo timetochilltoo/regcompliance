@@ -5,37 +5,124 @@ Internal Audit tool to query the Insurance Authority (IA) Hong Kong guidelines u
 ## What this does
 
 1. **Crawls** the IA HK guidelines page and downloads all guidelines (PDFs) to `data/pdfs/IA/`.
-2. **Extracts** text from each PDF and stores structured chunks in a local SQLite database (`data/regulatory.db`).
-3. **Answers** natural-language questions about the guidelines using a configurable LLM, with citations back to the source PDF and page.
+2. **Extracts** text from each PDF and stores structured chunks in a local SQLite database (`data/regulatory.db`), with vector embeddings for semantic search.
+3. **Answers** natural-language questions about the guidelines using a configurable LLM, with citations back to the source PDF, section, and page.
 
 ## Use cases
 
 - **Audit planning** — "List all required audits and their frequency from the IA guidelines."
-- **Audit execution** — "What controls are expected for AML customer due diligence?"
-- **Gap analysis** — "What does GL16 say about underwriting long-term insurance policies other than Class C?"
+- **Audit execution** — "What controls are expected for AML customer due diligence on politically exposed persons?"
+- **Cross-guideline comparison** — "Compare the cybersecurity requirements in GL20 with the outsourcing requirements in GL14."
 
-Every answer comes with source citations (guideline code, section, page) so the auditor can verify.
+Every answer comes with source citations (guideline code, section, page) so the auditor can verify against the original PDF.
 
 ## Quick start
 
 ```bash
-# 1. Set up the virtual environment (one time)
-python3 -m venv .venv
+# 1. Clone the repo
+git clone https://github.com/timetochilltoo/regcompliance.git
+cd regcompliance
+
+# 2. Set up Python 3.12 (macOS)
+brew install python@3.12
+
+# 3. Create venv and install dependencies
+python3.12 -m venv .venv
 .venv/bin/pip install -r requirements.txt
 
-# 2. Configure LLM provider
+# 4. Configure providers
 cp .env.example .env
-# Edit .env and add your API key (OpenAI / Anthropic / DeepSeek / MiniMax)
+# Edit .env and set at least:
+#   LLM_PROVIDER=minimax
+#   MINIMAX_API_KEY=sk-cp-...
+#   EMBEDDING_PROVIDER=minimax  (or openai/jina)
+#   OPENAI_API_KEY=sk-...       (if using OpenAI for embeddings)
 
-# 3. Crawl the IA HK guidelines
+# 5. Crawl the IA HK guidelines (~3-5 min, one-time cost ~$0.07 if using OpenAI)
 .venv/bin/python -m src.crawl
 
-# 4. Ask a question (CLI)
+# 6. Ask a question from the CLI
 .venv/bin/python -m src.ask "What is the required audit frequency for AML compliance?"
 
-# 5. Launch the chat UI
+# 7. Launch the chat UI
 .venv/bin/streamlit run src/app.py
+# Then open http://localhost:8501 in a browser
 ```
+
+## Use the system
+
+### CLI Q&A
+
+```bash
+# Auto-pick prompt template from question
+.venv/bin/python -m src.ask "What is the audit frequency for AML?"
+
+# Force a specific template
+.venv/bin/python -m src.ask --template control_extraction "What controls for CDD?"
+
+# Get JSON output (for scripting)
+.venv/bin/python -m src.ask --json "Compare GL15 and GL16" | jq '.answer'
+
+# Tag the audit log with a user name
+.venv/bin/python -m src.ask --user "Patrick" "Your question"
+
+# Don't write to audit log (for testing)
+.venv/bin/python -m src.ask --no-log "experimental question"
+```
+
+### Streamlit UI
+
+```bash
+.venv/bin/streamlit run src/app.py
+# Opens http://localhost:8501
+```
+
+Features:
+- Chat input box with 4 prompt templates (auto-detect or force one)
+- Top-K slider for retrieval (3-10 chunks)
+- Source citations as expandable cards with PDF links
+- Recent queries sidebar (read from `query_log` table)
+- Download answer as Markdown
+- All questions logged to the audit trail
+
+## Switching embedding providers
+
+The system supports three embedding providers. Default is OpenAI (industry standard, ~$0.07 one-time, requires VPN in HK).
+
+```bash
+# Edit .env:
+#   EMBEDDING_PROVIDER=openai   # or minimax, or jina
+#   OPENAI_API_KEY=sk-...
+
+# Re-embed (one-time, 30-60 sec)
+.venv/bin/python -m src.crawl --reembed-only
+
+# (Optional) Compare providers on the same 10 test queries
+.venv/bin/python -m src.benchmark
+```
+
+| Provider | Model | Cost | VPN in HK? | Notes |
+|---|---|---|---|---|
+| OpenAI (default) | text-embedding-3-small | $0.02/1M tokens | Yes | Industry standard |
+| MiniMax | embo-01 | Free with M-series key | No | Direct HTTP, not OpenAI SDK |
+| Jina | jina-embeddings-v3 | Free tier 1M tokens/month | No | Multilingual, task-aware |
+
+## Refreshing the database
+
+When IA HK publishes new or updated guidelines:
+
+```bash
+# Full refresh: re-download PDFs, re-extract, re-chunk, re-embed
+.venv/bin/python -m src.crawl
+
+# Re-embed only (if you only changed EMBEDDING_PROVIDER)
+.venv/bin/python -m src.crawl --reembed-only
+
+# Wipe everything and start fresh
+.venv/bin/python -m src.crawl --reingest
+```
+
+The crawler is idempotent — re-running it skips unchanged PDFs and stores new versions alongside old ones (so past audits remain citeable).
 
 ## Project layout
 
@@ -43,20 +130,23 @@ cp .env.example .env
 RegulatoryCompliance/
 ├── .venv/                      # Python virtual environment (not in git)
 ├── data/
-│   ├── regulatory.db           # SQLite database (not in git — can be regenerated)
-│   └── pdfs/IA/                # Downloaded PDFs (not in git — can be re-downloaded)
-├── logs/                       # Audit log of questions asked (not in git)
+│   ├── regulatory.db           # SQLite + sqlite-vec + FTS5 database (not in git)
+│   └── pdfs/IA/                # Downloaded PDFs (not in git)
+├── logs/                       # Query audit log (not in git)
 ├── reports/                    # Step-by-step findings
+├── docs/
+│   └── PROJECT_SPEC.md         # Full project spec for agent handoff
 ├── src/
-│   ├── config.py               # All configuration (paths, LLM provider, models)
+│   ├── config.py               # All configuration (paths, providers, models)
 │   ├── crawler_index.py        # Parses the IA HK guidelines index page
-│   ├── crawler_pdf.py          # Downloads PDFs and extracts text
-│   ├── crawl.py                # CLI entry point: run the full crawl
-│   ├── db.py                   # SQLite schema + sqlite-vec setup
-│   ├── embed.py                # Embedding generation (chunk → vector)
-│   ├── llm.py                  # Configurable LLM client (OpenAI / Anthropic / etc.)
+│   ├── crawler_pdf.py          # Downloads PDFs and extracts text (pdfplumber)
+│   ├── crawl.py                # Full ingest pipeline
+│   ├── db.py                   # SQLite + sqlite-vec + FTS5 schema, hybrid search
+│   ├── embed.py                # Section-aware chunking + multi-provider embeddings
+│   ├── llm.py                  # Multi-provider chat completions (MiniMax/OpenAI/etc.)
+│   ├── prompts.py              # 4 prompt templates + auto-router
 │   ├── ask.py                  # CLI Q&A entry point
-│   ├── prompts.py              # Prompt templates
+│   ├── benchmark.py            # Provider comparison harness
 │   └── app.py                  # Streamlit chat UI
 ├── .env.example                # Template for API keys
 ├── .gitignore
@@ -64,41 +154,20 @@ RegulatoryCompliance/
 └── README.md
 ```
 
-## Storage layout — what to back up
+## What to back up
 
-The "source of truth" for the regulatory content is IA HK's website. Everything else is derived. To back up the whole project:
+The "source of truth" for regulatory content is IA HK's website. Everything else is derived. To back up:
 
 | What | Where | Size | How to back up |
 |---|---|---|---|
 | Code | this folder, minus the items below | ~100 KB | git push (or zip) |
 | Downloaded PDFs | `data/pdfs/IA/` | ~30–50 MB | zip, or sync to iCloud/Dropbox |
-| SQLite database | `data/regulatory.db` | ~20 MB | copy the file |
-| Query audit log | `logs/` | grows over time | zip |
+| SQLite database | `data/regulatory.db` | ~29 MB | copy the file |
+| Query audit log | inside `data/regulatory.db` (`query_log` table) | grows | included in the DB backup |
 
-**Minimum viable backup:** git push the code. Re-running the crawler rebuilds everything else.
+**Minimum viable backup:** `git push` for the code. Re-running the crawler rebuilds everything else.
 
-**Laptop-loss-proof backup:** put the project folder in iCloud Drive or Dropbox. The `.gitignore` will keep secrets (.env) and the venv out of git, but everything else syncs automatically.
-
-## LLM provider
-
-Configurable via environment variables in `.env`. Default is OpenAI. Supported:
-
-- `openai` — OpenAI API (gpt-4o-mini default)
-- `deepseek` — DeepSeek API (OpenAI-compatible, set `OPENAI_BASE_URL=https://api.deepseek.com`)
-- `anthropic` — Anthropic Claude (set `LLM_PROVIDER=anthropic`)
-- `minimax` — MiniMax M2.7/M3 (set `LLM_PROVIDER=minimax` + endpoint)
-
-See `src/config.py` for all options.
-
-## Refreshing the database
-
-IA HK updates guidelines periodically. To pick up new or updated guidelines:
-
-```bash
-.venv/bin/python -m src.crawl --refresh
-```
-
-The crawler compares SHA-256 hashes of existing files against the live page. New files get downloaded, new versions get stored alongside the old (so historical audits remain citeable).
+**Laptop-loss-proof backup:** put the project folder in iCloud Drive or Dropbox. The `.gitignore` keeps secrets (`.env`) and the venv out of git, everything else syncs automatically.
 
 ## Cost estimate
 
@@ -106,17 +175,38 @@ The crawler compares SHA-256 hashes of existing files against the live page. New
 |---|---|
 | Crawler (run once or on refresh) | $0 |
 | Local storage | $0 |
-| Embeddings (one-time, ~66 PDFs) | ~$0.26 with OpenAI text-embedding-3-small |
-| LLM (per question, ~2k tokens) | $0.001–$0.01 with gpt-4o-mini |
-| **Estimated monthly (200 questions)** | **$5–20** |
+| Embeddings (one-time, 62 PDFs) | $0 with MiniMax embo-01; ~$0.07 with OpenAI |
+| LLM (per question, ~2k tokens in + 1k out) | $0.001–$0.01 with MiniMax M3 |
+| **Estimated monthly (200 questions)** | **$0–$2** with MiniMax |
+
+## Deployment to a VPS (when sharing with the team)
+
+For a team of 3+ auditors, deploy to a small Linux VPS:
+
+```bash
+# On a fresh Ubuntu 22.04 VPS (Hetzner/DigitalOcean, $5-10/month, Singapore or Japan for HK latency):
+sudo apt install -y python3.12 python3.12-venv nginx
+git clone https://github.com/timetochilltoo/regcompliance.git
+cd regcompliance
+python3.12 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+cp .env.example .env  # then edit
+
+# Run the app
+.venv/bin/streamlit run src/app.py --server.address 0.0.0.0 --server.port 8501
+
+# For HTTPS + a real domain, add nginx reverse proxy + Let's Encrypt cert.
+# See docs/PROJECT_SPEC.md "Setup from a clean machine" for full steps.
+```
 
 ## Status
 
-- [x] **Step 1** — Project scaffold + crawler + PDF extraction (smoke test on 6 PDFs passed)
-- [ ] **Step 2** — Full crawl of all 66 IA HK PDFs
-- [ ] **Step 3** — SQLite + chunking + embedding
-- [ ] **Step 4** — CLI Q&A
-- [ ] **Step 5** — LLM evaluation across providers
-- [ ] **Step 6** — Streamlit UI
+- [x] **Step 1** — Project scaffold + crawler + PDF extraction
+- [x] **Step 2** — Database (SQLite + sqlite-vec + FTS5) + multi-provider embeddings + hybrid retrieval
+- [x] **Step 3** — CLI Q&A tool (`src/ask.py`) with 4 prompt templates
+- [x] **Step 4** — Streamlit UI (`src/app.py`) with chat, citations, audit log
+- [ ] **Step 5** (optional) — Formal eval harness with 50+ labeled Q&A pairs
+- [ ] **Step 6** (optional) — Dockerfile + nginx config for one-line VPS deploy
+- [ ] **Step 7** (optional) — SFC and HKMA guideline crawlers
 
-See `reports/` for detailed step-by-step findings.
+See `reports/` for detailed step-by-step findings and `docs/PROJECT_SPEC.md` for the full project specification.

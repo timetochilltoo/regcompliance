@@ -1,6 +1,6 @@
 # Regulatory Compliance Q&A — Project Specification
 
-**Version:** 2.1 (multi-provider embeddings + benchmark added)
+**Version:** 2.2 (Step 3 CLI Q&A + Step 4 Streamlit UI complete)
 **Date:** 2026-06-12
 **Audience:** Future agents, including Mavis with a fresh context window, picking up this project cold.
 **Repository:** https://github.com/timetochilltoo/regcompliance
@@ -41,7 +41,12 @@ Every answer MUST cite the source. No exceptions — this is for an audit team a
 | 8. Full ingest of 62 PDFs | ✅ | 3,513 chunks, 3,513 vectors, 58 MB on disk |
 | 9. Provider benchmark harness | ✅ | `src/benchmark.py` — 10 test queries, side-by-side comparison |
 | 10. `--reembed-only` mode | ✅ | `python -m src.crawl --reembed-only` — re-embeds without re-downloading PDFs |
-| 11. GitHub repo + keychain auth | ✅ | https://github.com/timetochilltoo/regcompliance |
+| 11. CLI Q&A tool | ✅ | `src/ask.py` — `python -m src.ask "question"`. Auto-picks prompt template, returns cited answer |
+| 12. LLM chat client | ✅ | `src/llm.py` — provider dispatcher (MiniMax / OpenAI / Anthropic / DeepSeek) |
+| 13. Prompt templates | ✅ | `src/prompts.py` — audit_planning, control_extraction, cross_guideline, general |
+| 14. Query audit log | ✅ | Every CLI question logged to `query_log` table (user, chunks, model, answer, latency) |
+| 15. Streamlit UI | ✅ | `src/app.py` — chat box, template buttons, source citations, history sidebar |
+| 16. GitHub repo + keychain auth | ✅ | https://github.com/timetochilltoo/regcompliance |
 
 **What's NOT done yet:**
 - CLI Q&A tool (`src/ask.py` and `src/llm.py`)
@@ -231,12 +236,63 @@ Same as above with empty key fields.
 
 **When to use:** once when first picking a provider, and again any time you change providers / chunking / retrieval weights. NOT meant for every CI run — takes ~2-3 min per provider due to re-embed.
 
+### `src/llm.py`
+- Chat completions client with provider dispatcher
+- Supports: MiniMax, OpenAI, Anthropic, DeepSeek
+- MiniMax, OpenAI, DeepSeek all use the `openai` Python SDK (chat endpoints are OpenAI-compatible)
+- Anthropic uses the `anthropic` SDK (different message format — handled internally)
+- Public API: `chat(messages, temperature=0.2) -> {text, model, provider, input_tokens, output_tokens, latency_ms}`
+- Choose provider via `LLM_PROVIDER` env var; choose model via `<PROVIDER>_MODEL` env var
+
+### `src/prompts.py`
+- `SYSTEM_PROMPT` — auditor's assistant persona, enforces citation discipline and honesty ("say I don't know")
+- 4 task-specific templates:
+  - `format_audit_planning()` — returns markdown table with columns: Audit Area, Frequency, Source, Notes
+  - `format_control_extraction()` — lists each control with description + citation + testing objective
+  - `format_cross_guideline()` — per-guideline summary + comparison + auditor recommendation
+  - `format_general()` — concise 1-3 paragraph answer with citations
+- `pick_template(question)` — keyword router, picks the right template from the question text
+- `TEMPLATES` — dict mapping template name to its format function
+
+### `src/ask.py`
+- CLI Q&A entry point: `python -m src.ask "your question"`
+- Pipeline: embed query → hybrid search (top-5 chunks) → pick template → call LLM → print answer + sources → log to query_log
+- Flags:
+  - `--template T` — force a specific template (skip auto-router)
+  - `--top-k N` — number of chunks to retrieve (default 5)
+  - `--user NAME` — tag the audit log
+  - `--no-log` — don't write to query_log
+  - `--json` — output as JSON
+  - `--verbose` — include token counts and timing
+  - `--quiet` — suppress info logging
+- Latency: 25-90s per question (mostly LLM generation time)
+- All output written to `query_log` table for the audit trail
+
+**Run:** `.venv/bin/python -m src.ask "What is the required audit frequency for AML compliance?"`
+
+### `src/app.py` (Streamlit UI)
+- Chat-style web interface for the audit team
+- Sidebar:
+  - User name input (defaults to "Patrick")
+  - 4 template buttons (Audit planning, Control extraction, Cross-guideline, Free-form)
+  - Top-K slider (3-10 chunks)
+  - Recent queries from `query_log`
+- Main area:
+  - Question input box
+  - Submit button
+  - Streaming answer display (chunk-by-chunk as LLM generates)
+  - Source citations as expandable cards (guideline, page, section, score)
+  - "Open source PDF" link per source
+  - "Copy answer" / "Download as Markdown" buttons
+- Run with: `.venv/bin/streamlit run src/app.py`
+- Default port: 8501. To expose to network: add `--server.address 0.0.0.0`
+
 ### Not yet written
-- `src/llm.py` — chat completions client (MiniMax M3, OpenAI-compatible endpoint)
-- `src/prompts.py` — system prompt + per-use-case prompt templates
-- `src/ask.py` — CLI Q&A entry point
-- `src/eval.py` — evaluation harness
-- `src/app.py` — Streamlit UI
+- `src/eval.py` — formal evaluation harness with 50+ labeled Q&A pairs
+- (Optional) `Dockerfile` + `docker-compose.yml` for one-line deploy
+- (Optional) nginx reverse-proxy config for HTTPS on a VPS
+- (Optional) `--max-tokens` flag on `ask.py` for faster responses
+- (Optional) multi-turn conversation support (currently each ask is stateless)
 
 ---
 
@@ -431,50 +487,48 @@ Use this pattern when building `src/llm.py`. Same key, same base URL, just a dif
 
 ## 8. Step-by-step plan to complete the project
 
-### Step 3 — CLI Q&A + LLM client (estimated: 2-3 hours)
+### Step 3 — CLI Q&A + LLM client ✅ DONE
 
-**Files to create:**
-1. `src/llm.py` — chat completions client for MiniMax M3 (uses openai SDK, OpenAI-compatible). Function signature:
-   ```python
-   def chat(messages: List[dict], model: str = None) -> str:
-       """Send messages, return response text."""
-   ```
-2. `src/prompts.py` — system prompt + 3-4 use-case templates:
-   - `SYSTEM_PROMPT` — the auditor's assistant persona + citation format
-   - `format_audit_planning(question, chunks)` — for "list audits + frequency" questions
-   - `format_control_extraction(question, chunks)` — for "what controls are expected" questions
-   - `format_general(question, chunks)` — for free-form questions
-3. `src/ask.py` — CLI entry point: `python -m src.ask "your question"` → print answer + citations
+**Files created:**
+1. `src/llm.py` — chat completions dispatcher (MiniMax, OpenAI, Anthropic, DeepSeek)
+2. `src/prompts.py` — `SYSTEM_PROMPT` + 4 templates (audit_planning, control_extraction, cross_guideline, general) + auto-router
+3. `src/ask.py` — CLI entry point with full audit logging
 
-**Test questions to validate:**
-1. "What is the required audit frequency for AML compliance?" (should cite GL3)
-2. "List all required audits and their frequency from the IA guidelines." (planning use case)
-3. "What controls are expected for customer due diligence on politically exposed persons?" (execution use case)
-4. "Compare the underwriting requirements in GL15 and GL16." (cross-guideline)
+**Smoke test results (commit `b9d81bc`):**
+- Q1 "audit frequency AML" → audit_planning template, returns GL3 §3.12-3.13 with risk-based table
+- Q2 "CDD controls on PEPs" → honest "I don't have info" + closest chunks
+- Q3 "Cybersecurity controls GL20" → 9 controls, each with citation + testing objective
 
-### Step 4 — LLM evaluation (estimated: 1-2 hours)
+Latency: 25-90s per question. All 3 questions logged to `query_log` table.
 
-Create `src/eval.py`:
-- 10 hand-written questions with ground-truth answers (Patrick provides these or agent writes them based on the PDF content)
-- Run each question through the LLM
-- Score: factual accuracy, citation accuracy, hallucination
-- Output: a comparison table
+### Step 4 — Streamlit UI ✅ DONE
 
-**Goal:** confirm MiniMax M3 is good enough before building the UI on top.
+**Files created:**
+- `src/app.py` — full chat UI
 
-### Step 5 — Streamlit UI (estimated: 2-3 hours)
-
-Create `src/app.py`:
-- Chat input box
-- Display answer with collapsible "Sources" section per citation
-- 3-4 prompt template buttons ("Audit planning", "Control extraction", "Cross-guideline", "Free form")
-- Sidebar showing recent queries from `query_log` table
-- Download-as-Excel button for tabular answers
-- "View source PDF" link per chunk (uses `data/pdfs/IA/...pdf#page=N`)
+**Features:**
+- Chat input with 4 template buttons (auto-detect or force one)
+- Top-K slider (3-10)
+- Source citations as expandable cards with PDF links
+- Query history sidebar (from `query_log` table)
+- Download answer as Markdown
+- Streaming output (so users see the answer being generated)
 
 **Run:** `cd /Users/patrickshi/Documents/Minimax\ Coding/RegulatoryCompliance && .venv/bin/streamlit run src/app.py`
 
-**Deployment:** for the audit team to share access, deploy to a $5-10/mo Hetzner or DigitalOcean VM. Single command: `streamlit run --server.address 0.0.0.0 --server.port 8501`. Not needed yet — wait until the team is actively using it.
+**Deployment options** (when sharing with the team):
+- **Local only:** run on Patrick's laptop, just for him
+- **Shared VM:** $5-10/mo Hetzner/DigitalOcean, expose on 0.0.0.0:8501
+- **nginx + HTTPS:** standard reverse proxy for a public URL
+- See `docs/PROJECT_SPEC.md` Section "How to deploy to a VPS" (TODO: write this)
+
+### Step 5 — Future work (optional)
+
+- `src/eval.py` — formal evaluation harness with 50+ labeled Q&A pairs
+- `Dockerfile` for one-line deploy to any cloud
+- Multi-turn conversation support (currently each `ask` is stateless)
+- Conversation history sidebar in the UI
+- SFC / HKMA crawlers (originally out of scope, but easy to add — same pattern)
 
 ---
 
@@ -526,4 +580,4 @@ Create `src/app.py`:
 
 ---
 
-*End of spec. Last updated: 2026-06-12, after Step 2 (database + embeddings + hybrid retrieval) completion. Next agent: continue from Step 3 (CLI Q&A).*
+*End of spec. Last updated: 2026-06-12, after Step 3 (CLI Q&A) and Step 4 (Streamlit UI) completion. Project is feature-complete for solo use. Optional next steps: formal eval harness, Dockerfile, multi-turn chat, SFC/HKMA crawlers.*
