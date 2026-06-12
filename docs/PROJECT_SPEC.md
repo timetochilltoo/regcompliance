@@ -1,6 +1,6 @@
 # Regulatory Compliance Q&A — Project Specification
 
-**Version:** 2.0 (handoff-ready)
+**Version:** 2.1 (multi-provider embeddings + benchmark added)
 **Date:** 2026-06-12
 **Audience:** Future agents, including Mavis with a fresh context window, picking up this project cold.
 **Repository:** https://github.com/timetochilltoo/regcompliance
@@ -13,7 +13,7 @@
 
 A tool for **Patrick's Internal Audit team** to query the **Insurance Authority (IA) Hong Kong guidelines** using natural language. Two halves:
 
-1. **Crawler** — downloads IA HK guideline PDFs, extracts text, chunks with section metadata, embeds via MiniMax embo-01, stores in SQLite.
+1. **Crawler** — downloads IA HK guideline PDFs, extracts text, chunks with section metadata, embeds via a **swap-able embedding provider** (OpenAI / MiniMax / Jina), stores in SQLite.
 2. **Q&A app** — auditor asks a question in plain English, gets an LLM-generated answer with citations (guideline code, section, page) to the source PDF.
 
 **Use cases:**
@@ -22,6 +22,8 @@ A tool for **Patrick's Internal Audit team** to query the **Insurance Authority 
 - **Cross-guideline comparison:** "Compare underwriting requirements in GL15 vs GL16."
 
 Every answer MUST cite the source. No exceptions — this is for an audit team and citations are non-negotiable for defensibility.
+
+**Embedding providers are swappable.** The default in `.env.example` is OpenAI's `text-embedding-3-small` (industry standard, ~$0.07 one-time, requires VPN in HK). MiniMax `embo-01` (no VPN, free with M-series key) and Jina `jina-embeddings-v3` (free tier 1M tokens/month, multilingual) are drop-in alternatives. Switching is a one-line `.env` change + `python -m src.crawl --reembed-only`. The retrieval pipeline is provider-agnostic; use `python -m src.benchmark` to compare providers on the same 10 test queries. See §5.3.
 
 ---
 
@@ -34,19 +36,22 @@ Every answer MUST cite the source. No exceptions — this is for an audit team a
 | 3. PDF downloader + extractor | ✅ | `src/crawler_pdf.py` — pdfplumber, 0 OCR needed |
 | 4. Database schema | ✅ | `src/db.py` — SQLite + sqlite-vec + FTS5 + section metadata + query log |
 | 5. Section-aware chunker | ✅ | `src/embed.py` — extracts `section_number` + `section_heading` per chunk |
-| 6. MiniMax embo-01 embeddings | ✅ | `src/embed.py` — direct HTTP, NOT via openai SDK |
+| 6. Multi-provider embeddings | ✅ | `src/embed.py` — registry pattern; OpenAI / MiniMax / Jina. Switch via `.env` |
 | 7. Hybrid retriever | ✅ | `db.hybrid_search()` — vector (0.5) + FTS (0.3) + title boost (0.15) + heading boost (0.05) |
 | 8. Full ingest of 62 PDFs | ✅ | 3,513 chunks, 3,513 vectors, 58 MB on disk |
-| 9. GitHub repo + keychain auth | ✅ | https://github.com/timetochilltoo/regcompliance |
+| 9. Provider benchmark harness | ✅ | `src/benchmark.py` — 10 test queries, side-by-side comparison |
+| 10. `--reembed-only` mode | ✅ | `python -m src.crawl --reembed-only` — re-embeds without re-downloading PDFs |
+| 11. GitHub repo + keychain auth | ✅ | https://github.com/timetochilltoo/regcompliance |
 
 **What's NOT done yet:**
 - CLI Q&A tool (`src/ask.py` and `src/llm.py`)
 - Prompt templates (`src/prompts.py`)
-- LLM client for MiniMax M3 chat (`src/llm.py`)
-- LLM evaluation harness
+- LLM client for MiniMax M3 chat (`src/llm.py`) — chat endpoint IS OpenAI-compatible, easy
 - Streamlit UI (`src/app.py`)
 - Audit log integration (table exists, no UI/logging yet)
 - Backup script (just docs, no automation)
+
+**Side-by-side embedding storage: NOT used.** We picked Option A (single active provider, destructive re-embed on dim change) because re-embedding 3.5k chunks takes 30-60 sec — keeping both providers' vectors side-by-side in separate `vec_chunks_*` tables would double DB complexity for no real benefit at our scale. The `benchmark.py` script lets you compare providers without committing to keeping both.
 
 ---
 
@@ -107,19 +112,30 @@ streamlit>=1.35.0
 
 ### `.env` (in `.gitignore`, must be created by user)
 ```bash
+# LLM (answer generation) — MiniMax is HK-accessible
 LLM_PROVIDER=minimax
 MINIMAX_API_KEY=<user's key>
 MINIMAX_MODEL=MiniMax-M3
 MINIMAX_BASE_URL=https://api.minimaxi.com/v1   # NOTE: minimaxi.com, NOT minimax.com
 
-EMBEDDING_PROVIDER=minimax
-MINIMAX_EMBEDDING_MODEL=embo-01
+# Embedding (vector search) — default is OpenAI, requires VPN in HK
+EMBEDDING_PROVIDER=openai
+EMBEDDING_MODEL=text-embedding-3-small
 EMBEDDING_DIM=1536
+OPENAI_API_KEY=<user's OpenAI key>
 
-# Optional, unused currently:
-OPENAI_API_KEY=
-OPENAI_MODEL=gpt-4o-mini
+# Alternative: switch to MiniMax embo-01 (no VPN)
+# EMBEDDING_PROVIDER=minimax
+# MINIMAX_EMBEDDING_MODEL=embo-01
+
+# Alternative: Jina (free tier 1M tokens/month, multilingual)
+# EMBEDDING_PROVIDER=jina
+# JINA_API_KEY=<user's Jina key>
+# JINA_EMBEDDING_MODEL=jina-embeddings-v3
+# JINA_EMBEDDING_DIM=1024
 ```
+
+Only fill in the keys for providers you've actually selected. See `.env.example` for the full annotated template.
 
 ### `.env.example` (committed, template for users)
 Same as above with empty key fields.
@@ -175,19 +191,45 @@ Same as above with empty key fields.
   - **Section detection** via regex on a 2000-char window before each chunk's start
   - Patterns: numbered (`1.2.3 Title`), `§/Section/Article N`, `GL3-5.3`, `Chapter N`
 - `_detect_section_at(page_text, char_offset)` → (section_number, section_heading)
-- `_provider_config()` → (provider_name, api_key) for `minimax` or `openai`
-- `_minimax_embed(texts, embed_type="db")` → **direct HTTP, NOT openai SDK** (see §7)
-- `_openai_embed(texts, model)` → standard openai SDK call
-- `embed_texts(texts, embed_type="db")` → dispatches by provider
-- `embed_query(text)` → single query embed; for MiniMax uses `type=query` with auto-fallback to `db`
+- **Embedding provider registry** — `OpenAIProvider`, `MiniMaxProvider`, `JinaProvider`
+  - All implement the same `EmbeddingProvider` interface (name, dim, embed_texts, embed_query)
+  - To add a new provider: write a class with those 4 things + register in `_PROVIDERS` dict + add config block to `src/config.py`
+- `get_provider()` → returns the configured provider instance
+- `list_providers()` → names of all registered providers (for CLI help)
+- `embed_texts(texts)` → dispatches to current provider, validates dim matches DB
+- `embed_query(text)` → single query embed; each provider uses its preferred query format
+  - OpenAI: just `embed_texts([text])[0]`
+  - MiniMax: uses `type=query` with auto-fallback to `type=db`
+  - Jina: uses `task=retrieval.query` (better quality than task-agnostic)
 
 ### `src/crawl.py`
-- `run(limit, reingest)` → end-to-end ingest pipeline
-- `ingest_one(conn, guideline, sub_label, sub_url)` → download + extract + chunk + embed + store
-- `main()` → CLI entry point with `--limit N`, `--reingest`, `--verbose` flags
+- `run(limit, reingest)` → end-to-end ingest pipeline (download + extract + chunk + embed + store)
+- `reembed_all()` → re-embed all existing chunks with the current provider (no re-download, no re-chunking)
+- `ingest_one(conn, guideline, sub_label, sub_url)` → download + extract + chunk + embed + store for one PDF
+- `main()` → CLI entry point with flags:
+  - `--limit N` — process only the first N guidelines
+  - `--reingest` — wipe everything and start fresh
+  - `--reembed-only` — re-embed existing chunks with the current provider
+  - `--verbose` — debug logging
 - Logs to `logs/crawl.log` AND stdout
 
-**Run:** `cd /Users/patrickshi/Documents/Minimax\ Coding/RegulatoryCompliance && .venv/bin/python -m src.crawl`
+**Run:**
+```bash
+.venv/bin/python -m src.crawl              # full pipeline
+.venv/bin/python -m src.crawl --reembed-only   # just re-embed (provider swap)
+```
+
+### `src/benchmark.py`
+- 10 hand-picked test queries covering the main audit use cases (audit frequency, controls, outsourcing, cybersecurity, ERM, CPD, underwriting, governance, record-keeping, capital)
+- For each query: a list of `(guideline_code, page)` tuples considered "relevant"
+- Metrics: `recall_at_5` (fraction of relevant guidelines found in top-5), `top1_accuracy` (was #1 hit relevant), `avg_first_relevant_rank`
+- `python -m src.benchmark` → re-embeds with each configured provider, runs queries, prints comparison table
+- `python -m src.benchmark --query-only` → skip re-embed, just test current provider (30 sec)
+- Results written to `reports/benchmark_results.json`
+
+**Run:** `.venv/bin/python -m src.benchmark [--providers openai minimax jina] [--query-only]`
+
+**When to use:** once when first picking a provider, and again any time you change providers / chunking / retrieval weights. NOT meant for every CI run — takes ~2-3 min per provider due to re-embed.
 
 ### Not yet written
 - `src/llm.py` — chat completions client (MiniMax M3, OpenAI-compatible endpoint)
@@ -198,14 +240,64 @@ Same as above with empty key fields.
 
 ---
 
-## 5. Key technical decisions (and why)
+## 5. Multi-provider embedding design
+
+### Why multiple providers?
+
+Three reasons:
+1. **Hong Kong + OpenAI = VPN friction.** OpenAI's `text-embedding-3-small` is the industry standard but needs VPN. The workflow is: connect VPN → re-embed corpus (30-60 sec) → disconnect VPN → use system normally. Acceptable for a one-time cost, but having a no-VPN fallback (MiniMax) is convenient.
+2. **Unknown which model is best for regulatory text.** OpenAI is the safe default, but MiniMax `embo-01` was specifically trained on Chinese + English (IA HK is bilingual) — it might actually be better. Jina's `jina-embeddings-v3` is the strongest multilingual model available. Without testing on our actual content, we're guessing.
+3. **Benchmarking without rewriting the app.** If a future LLM provider adds a better embedding model, dropping it in is a 50-line code change (one new class, one entry in `_PROVIDERS`).
+
+### The three supported providers
+
+| Provider | Model | Dim | Cost | VPN in HK? | Notes |
+|---|---|---|---|---|---|
+| **OpenAI** (default) | `text-embedding-3-small` | 1536 | $0.02/1M tokens (~$0.07 one-time for our corpus) | Yes | Industry standard; well-tested |
+| **MiniMax** | `embo-01` | 1536 | Free with M-series key | No | Direct HTTP, NOT OpenAI SDK (see §7) |
+| **Jina** | `jina-embeddings-v3` | 1024 | Free 1M tokens/month; $0.02/1M after | No | Multilingual, task-aware (retrieval.passage / retrieval.query) |
+
+### How to switch providers
+
+```bash
+# 1. Edit .env — set EMBEDDING_PROVIDER (and provider-specific key)
+EMBEDDING_PROVIDER=openai
+OPENAI_API_KEY=sk-...
+
+# 2. Re-embed (one-time, 30-60 sec, requires VPN for OpenAI)
+python -m src.crawl --reembed-only
+
+# 3. (Optional) Compare against other providers
+python -m src.benchmark
+```
+
+The system handles dim changes automatically — `init_db()` detects when `vec_chunks` was created with a different `EMBEDDING_DIM` than the current config, drops the old table, and recreates it empty. Re-embedding then fills it back up. **This is destructive for the current provider's vectors** but they're regeneratable from the same `.env` in 30-60 sec.
+
+### Why we did NOT use side-by-side provider storage
+
+Considered a `vec_chunks_openai` / `vec_chunks_minimax` design where both providers' vectors live simultaneously. Rejected because:
+
+- Re-embedding 3,500 chunks takes 30-60 sec. The "cost" of switching is negligible.
+- Side-by-side doubles DB complexity (two tables, two embed pipelines, pick-one-at-query-time logic).
+- The benchmark script already lets you compare providers without committing to keeping both.
+- At 1M+ chunks we'd revisit this. At 3.5k it's overkill.
+
+### What a future agent should NOT change
+
+- The `EmbeddingProvider` interface shape (`name`, `dim`, `embed_texts`, `embed_query`) — adding a new provider means implementing this exactly, not extending it.
+- The `EMBEDDING_DIM` env var — must match the active provider's model dim, or `embed_texts()` raises and the corpus is unusable until re-embedded.
+- The chunking/retrieval logic is provider-agnostic. Do NOT add provider-specific logic to `db.hybrid_search()` or `embed.chunk_pages()`.
+
+### 5.1 Other key technical decisions (non-embedding)
 
 | Decision | Choice | Rationale |
 |---|---|---|
 | Storage | SQLite + sqlite-vec | Single file, zero infra, 58 MB fits the whole corpus, vector search works |
 | Chunk size | 1000 chars / 200 overlap | Regulatory text is dense; this size keeps individual sections intact while giving the LLM enough context |
 | Retrieval | Hybrid (vector + FTS5 + boosts) | Vector misses exact section numbers; FTS5 misses paraphrases; both together catch citations and semantics |
-| Vector dim | 1536 | Matches MiniMax embo-01 (also matches OpenAI text-embedding-3-small, easy swap) |
+| Vector dim | Provider-dependent (1536 for OpenAI/MiniMax, 1024 for Jina) | Set in `.env` as `EMBEDDING_DIM`; sqlite-vec table is auto-recreated on dim change |
+| Embedding provider | Swappable via `.env` (OpenAI / MiniMax / Jina) | One-time cost per corpus; re-embed in 30-60 sec when switching. Default OpenAI for quality; MiniMax for HK accessibility. |
+| Provider side-by-side storage | Single active provider (Option A) | Re-embed cost is trivial at 3.5k chunks; keeping both adds DB complexity. Benchmark script lets us compare without committing to both. |
 | Frontend | Streamlit | Pure Python, no JS/HTML needed, single command to run |
 | PDF extraction | pdfplumber (pypdf fallback) | Best table handling for regulatory control matrices |
 | Section detection | Regex on each chunk's preceding window | Cheap, no LLM call, ~85% recall on common IA HK formats |
