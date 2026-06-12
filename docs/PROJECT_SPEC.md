@@ -1,0 +1,437 @@
+# Regulatory Compliance Q&A — Project Specification
+
+**Version:** 2.0 (handoff-ready)
+**Date:** 2026-06-12
+**Audience:** Future agents, including Mavis with a fresh context window, picking up this project cold.
+**Repository:** https://github.com/timetochilltoo/regcompliance
+**Project root:** `/Users/patrickshi/Documents/Minimax Coding/RegulatoryCompliance/`
+**Owner:** Patrick (Internal Audit, Hong Kong)
+
+---
+
+## 1. What this project is
+
+A tool for **Patrick's Internal Audit team** to query the **Insurance Authority (IA) Hong Kong guidelines** using natural language. Two halves:
+
+1. **Crawler** — downloads IA HK guideline PDFs, extracts text, chunks with section metadata, embeds via MiniMax embo-01, stores in SQLite.
+2. **Q&A app** — auditor asks a question in plain English, gets an LLM-generated answer with citations (guideline code, section, page) to the source PDF.
+
+**Use cases:**
+- **Audit planning:** "List all required audits and their frequency from the IA guidelines."
+- **Audit execution:** "What controls are expected for AML customer due diligence on PEPs?"
+- **Cross-guideline comparison:** "Compare underwriting requirements in GL15 vs GL16."
+
+Every answer MUST cite the source. No exceptions — this is for an audit team and citations are non-negotiable for defensibility.
+
+---
+
+## 2. Current state (what's done)
+
+| Step | Status | Output |
+|---|---|---|
+| 1. Project scaffold | ✅ | `.venv` (Python 3.12), `requirements.txt`, `.gitignore`, `.env.example` |
+| 2. IA HK index parser | ✅ | `src/crawler_index.py` — parses 37 entries (34 active + 3 repealed) |
+| 3. PDF downloader + extractor | ✅ | `src/crawler_pdf.py` — pdfplumber, 0 OCR needed |
+| 4. Database schema | ✅ | `src/db.py` — SQLite + sqlite-vec + FTS5 + section metadata + query log |
+| 5. Section-aware chunker | ✅ | `src/embed.py` — extracts `section_number` + `section_heading` per chunk |
+| 6. MiniMax embo-01 embeddings | ✅ | `src/embed.py` — direct HTTP, NOT via openai SDK |
+| 7. Hybrid retriever | ✅ | `db.hybrid_search()` — vector (0.5) + FTS (0.3) + title boost (0.15) + heading boost (0.05) |
+| 8. Full ingest of 62 PDFs | ✅ | 3,513 chunks, 3,513 vectors, 58 MB on disk |
+| 9. GitHub repo + keychain auth | ✅ | https://github.com/timetochilltoo/regcompliance |
+
+**What's NOT done yet:**
+- CLI Q&A tool (`src/ask.py` and `src/llm.py`)
+- Prompt templates (`src/prompts.py`)
+- LLM client for MiniMax M3 chat (`src/llm.py`)
+- LLM evaluation harness
+- Streamlit UI (`src/app.py`)
+- Audit log integration (table exists, no UI/logging yet)
+- Backup script (just docs, no automation)
+
+---
+
+## 3. Architecture overview
+
+```
+┌────────────────────────────────────────────────────────────────┐
+│  PHASE 1: CRAWLER (one-time + on-demand refresh)               │
+│                                                                │
+│  IA HK index page                                              │
+│      ↓                                                         │
+│  crawler_index.py (BeautifulSoup)                              │
+│      ↓ list of {code, title, url, sub_docs, version_label}     │
+│  crawler_pdf.py (pdfplumber)                                   │
+│      ↓ PDFs to data/pdfs/IA/, text per page                    │
+│  embed.py (chunk_pages)                                        │
+│      ↓ 3513 chunks with section metadata                       │
+│  embed.py (MiniMax embo-01, direct HTTP)                       │
+│      ↓ 1536-dim vectors                                        │
+│  db.py (SQLite + sqlite-vec + FTS5)                            │
+└────────────────────────────────────────────────────────────────┘
+                            ↓
+┌────────────────────────────────────────────────────────────────┐
+│  PHASE 2: Q&A (pending implementation)                         │
+│                                                                │
+│  Auditor question                                              │
+│      ↓                                                         │
+│  Hybrid retrieval:                                             │
+│    - Vector search (sqlite-vec cosine)  → top-K                │
+│    - FTS5 BM25 keyword search           → top-K                │
+│    - Merge with weights + boosts + dedup                       │
+│      ↓ top-5 chunks                                            │
+│  LLM call (MiniMax M3 chat, OpenAI-compatible)                 │
+│      ↓                                                         │
+│  Answer + citations                                            │
+│  Logged to query_log table                                     │
+└────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## 4. File-by-file reference
+
+### `requirements.txt`
+```
+requests>=2.31.0
+beautifulsoup4>=4.12.0
+lxml>=5.0.0
+python-dotenv>=1.0.0
+pdfplumber>=0.10.0
+pypdf>=4.0.0
+sqlite-vec>=0.1.0
+numpy>=1.24.0
+openai>=1.30.0
+anthropic>=0.30.0
+streamlit>=1.35.0
+```
+
+### `.env` (in `.gitignore`, must be created by user)
+```bash
+LLM_PROVIDER=minimax
+MINIMAX_API_KEY=<user's key>
+MINIMAX_MODEL=MiniMax-M3
+MINIMAX_BASE_URL=https://api.minimaxi.com/v1   # NOTE: minimaxi.com, NOT minimax.com
+
+EMBEDDING_PROVIDER=minimax
+MINIMAX_EMBEDDING_MODEL=embo-01
+EMBEDDING_DIM=1536
+
+# Optional, unused currently:
+OPENAI_API_KEY=
+OPENAI_MODEL=gpt-4o-mini
+```
+
+### `.env.example` (committed, template for users)
+Same as above with empty key fields.
+
+### `src/config.py`
+- Loads `.env` at import time via `python-dotenv`
+- Defines all paths (`PROJECT_ROOT`, `DATA_DIR`, `PDF_DIR`, `DB_PATH`, `LOG_DIR`, `REPORT_DIR`)
+- Defines all model names and provider selection
+- Defines chunking parameters (`CHUNK_SIZE=1000`, `CHUNK_OVERLAP=200`)
+- Defines retrieval parameters (`TOP_K_CHUNKS=8`, vec/fts weights)
+- **Crawler config:** `GUIDELINES_INDEX_URL`, `CRAWL_DELAY_SEC=1.0`, `HTTP_USER_AGENT`
+
+### `src/crawler_index.py`
+- `fetch_index()` → `requests.get()` + `BeautifulSoup` parse of IA HK page
+- Returns `List[Guideline]` dataclass with: `code`, `title`, `url`, `is_repealed`, `sub_documents[]`, `version_label`
+- **Page structure to parse:** `<table class="table guideline">` with `<tr><td data-title="Guidelines">` rows
+- **Repealed detection:** row has no `<a href>` (text-only) → marked `is_repealed=True`
+- **Sub-doc detection:** look for `<div class="subitem"><ul><li><a>` inside the cell
+
+### `src/crawler_pdf.py`
+- `local_path_for(code, url, title, sub_label, version_label)` → human-readable filename
+  - Format: `{code}_{slug_from_title}[_{sub_label}][_v{YYYY-MM-DD}[-prev]].pdf`
+  - e.g. `GL3_Guideline_on_Anti-Money_Laundering.pdf`, `GL16_..._v2026-03-31.pdf`, `GL14_..._Q&A.pdf`
+- `download_pdf(url, dest)` → streams PDF, skips if already exists
+- `extract_text(pdf_path)` → returns `ExtractedPdf` with pages_text list (one string per page)
+  - Tries `pdfplumber` first (best for tables), falls back to `pypdf`
+- `download_and_extract_guideline(guideline, sub_label, sub_url)` → orchestrates the two
+- `ExtractedPdf` dataclass: `code`, `title`, `source_url`, `pdf_path`, `sha256`, `page_count`, `pages_text`, `extraction_engine`, `extraction_warnings`
+
+### `src/db.py`
+- `connect()` context manager → loads sqlite-vec, sets WAL + foreign keys, row_factory
+- `init_db()` → creates schema (idempotent)
+- `upsert_guideline()` → inserts/updates by `source_url`
+- `insert_chunks()` → wipes old chunks for guideline, inserts new
+- `vector_search(query_embedding, top_k)` → sqlite-vec cosine, returns chunks with distance
+- `fts_search(query, top_k)` → FTS5 BM25, returns chunks with fts_score
+- `hybrid_search(query, query_embedding, top_k, vec_weight=0.5, fts_weight=0.3, title_boost=0.15, heading_boost=0.05)` → merged & reranked
+- `log_query()` → records Q&A to audit log
+- `stats()` → DB summary for sanity checks
+
+**Schema highlights:**
+- `guidelines` table: id, code, title, source_url (UNIQUE), local_path, sha256, page_count, file_bytes, is_main, parent_code, version_label, is_repealed, extraction_engine, extraction_warnings, crawled_at, updated_at
+- `chunks` table: id, guideline_id (FK), chunk_index, page_number, char_start, char_end, text, section_number, section_heading, char_count
+- `chunks_fts` FTS5 virtual table, kept in sync via triggers
+- `vec_chunks` sqlite-vec virtual table, float[1536], cosine distance
+- `query_log` table: id, asked_at, user, question, retrieved_chunks (JSON), llm_provider, llm_model, answer, latency_ms
+
+### `src/embed.py`
+- `Chunk` dataclass: chunk_index, page_number, char_start, char_end, text, section_number, section_heading
+- `chunk_pages(pages_text, chunk_size=1000, overlap=200)` → List[Chunk]
+  - Walks pages sequentially
+  - Overlapping windows snapped to paragraph breaks > sentence ends > whitespace
+  - **Section detection** via regex on a 2000-char window before each chunk's start
+  - Patterns: numbered (`1.2.3 Title`), `§/Section/Article N`, `GL3-5.3`, `Chapter N`
+- `_detect_section_at(page_text, char_offset)` → (section_number, section_heading)
+- `_provider_config()` → (provider_name, api_key) for `minimax` or `openai`
+- `_minimax_embed(texts, embed_type="db")` → **direct HTTP, NOT openai SDK** (see §7)
+- `_openai_embed(texts, model)` → standard openai SDK call
+- `embed_texts(texts, embed_type="db")` → dispatches by provider
+- `embed_query(text)` → single query embed; for MiniMax uses `type=query` with auto-fallback to `db`
+
+### `src/crawl.py`
+- `run(limit, reingest)` → end-to-end ingest pipeline
+- `ingest_one(conn, guideline, sub_label, sub_url)` → download + extract + chunk + embed + store
+- `main()` → CLI entry point with `--limit N`, `--reingest`, `--verbose` flags
+- Logs to `logs/crawl.log` AND stdout
+
+**Run:** `cd /Users/patrickshi/Documents/Minimax\ Coding/RegulatoryCompliance && .venv/bin/python -m src.crawl`
+
+### Not yet written
+- `src/llm.py` — chat completions client (MiniMax M3, OpenAI-compatible endpoint)
+- `src/prompts.py` — system prompt + per-use-case prompt templates
+- `src/ask.py` — CLI Q&A entry point
+- `src/eval.py` — evaluation harness
+- `src/app.py` — Streamlit UI
+
+---
+
+## 5. Key technical decisions (and why)
+
+| Decision | Choice | Rationale |
+|---|---|---|
+| Storage | SQLite + sqlite-vec | Single file, zero infra, 58 MB fits the whole corpus, vector search works |
+| Chunk size | 1000 chars / 200 overlap | Regulatory text is dense; this size keeps individual sections intact while giving the LLM enough context |
+| Retrieval | Hybrid (vector + FTS5 + boosts) | Vector misses exact section numbers; FTS5 misses paraphrases; both together catch citations and semantics |
+| Vector dim | 1536 | Matches MiniMax embo-01 (also matches OpenAI text-embedding-3-small, easy swap) |
+| Frontend | Streamlit | Pure Python, no JS/HTML needed, single command to run |
+| PDF extraction | pdfplumber (pypdf fallback) | Best table handling for regulatory control matrices |
+| Section detection | Regex on each chunk's preceding window | Cheap, no LLM call, ~85% recall on common IA HK formats |
+| Crawler politeness | 1-second delay between downloads | Respectful to IA HK; trivial cost |
+| Versioning | Keep both versions of a guideline (current + previous) | Past audits must cite the version in force at audit time |
+
+---
+
+## 6. Setup from a clean machine
+
+```bash
+# 1. Install Homebrew (if not installed)
+/bin/bash -c "$(curl -fsL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+
+# 2. Install Python 3.12 (system Python doesn't have sqlite-vec support)
+brew install python@3.12
+
+# 3. Clone the repo
+cd "/Users/patrickshi/Documents/Minimax Coding"
+git clone https://github.com/timetochilltoo/regcompliance.git RegulatoryCompliance
+cd RegulatoryCompliance
+
+# 4. Create venv and install deps
+python3.12 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+
+# 5. Set up git credential helper
+git config --global credential.helper osxkeychain
+git config --global user.name "Patrick"
+
+# 6. Create .env from template
+cp .env.example .env
+# Edit .env and fill in MINIMAX_API_KEY=... and LLM_PROVIDER=minimax
+
+# 7. Run the full ingest (3-5 minutes)
+.venv/bin/python -m src.crawl
+
+# 8. Verify
+.venv/bin/python -c "from src.db import stats; import json; print(json.dumps(stats(), indent=2, default=str))"
+```
+
+**Expected output of step 8:** 62+ guidelines, 3500+ chunks, 3500+ vectors.
+
+**Backup of local data (not in git):**
+```bash
+# Zip everything except venv and .env
+cd "/Users/patrickshi/Documents/Minimax Coding"
+tar --exclude='RegulatoryCompliance/.venv' --exclude='RegulatoryCompliance/.env' \
+    -czf regulatory_compliance_backup.tar.gz RegulatoryCompliance/
+# Or sync to iCloud/Dropbox
+```
+
+---
+
+## 7. ⚠️ MiniMax API gotchas (READ THIS BEFORE TOUCHING LLM/EMBED CODE)
+
+This is the section that took an hour to debug. Future agents: don't relearn it.
+
+### 7.1 Embeddings endpoint is NOT OpenAI-compatible
+
+The MiniMax M-series chat endpoint is OpenAI-API-compatible. **The embeddings endpoint is NOT.**
+
+**Wrong (will fail with misleading "Connection error"):**
+```python
+from openai import OpenAI
+client = OpenAI(api_key=KEY, base_url="https://api.minimaxi.com/v1")
+client.embeddings.create(model="embo-01", input=["text"])  # ❌ WRONG PAYLOAD
+```
+
+**Right (use direct HTTP):**
+```python
+import requests
+
+r = requests.post(
+    "https://api.minimaxi.com/v1/embeddings",
+    headers={"Authorization": f"Bearer {KEY}", "Content-Type": "application/json"},
+    json={
+        "model": "embo-01",
+        "texts": ["text here"],   # NOT "input"
+        "type": "db"               # "db" for documents, "query" for queries
+    },
+    timeout=60
+)
+r.raise_for_status()
+data = r.json()
+if data["base_resp"]["status_code"] != 0:
+    raise RuntimeError(data)
+vectors = data["vectors"]  # List[List[float]], 1536-dim
+```
+
+**Why this matters:** the openai SDK call returns `openai.APIConnectionError: Connection error` for the wrong payload. This looks like a network problem but is actually a payload format problem. Don't waste time debugging network/firewall/VPN.
+
+### 7.2 Base URL is `minimaxi.com`, not `minimax.com`
+
+`https://api.minimax.com/v1` → connection refused (host doesn't exist)
+`https://api.minimaxi.com/v1` → 401 (live, needs valid key)
+`https://api.MiniMax.com/v1` → connection refused (also doesn't exist)
+
+**Always use `https://api.minimaxi.com/v1`**. The endpoint path is `/embeddings` for embeddings, `/chat/completions` for chat.
+
+### 7.3 Embedding type: `db` vs `query`
+
+- `type=db` — for document chunks being stored
+- `type=query` — for user queries
+- The two are different models internally (or different prefixes); using the wrong one gives worse retrieval
+- If `type=query` fails, **fall back to `type=db`** — `query` is a newer/optional endpoint and may not be available on all keys/tiers
+- The implementation in `src/embed.py::embed_query()` already handles this fallback
+
+### 7.4 Chat endpoint IS OpenAI-compatible
+
+For the chat (answer generation) endpoint, the openai SDK works fine:
+
+```python
+from openai import OpenAI
+client = OpenAI(api_key=KEY, base_url="https://api.minimaxi.com/v1")
+resp = client.chat.completions.create(
+    model="MiniMax-M3",
+    messages=[{"role": "user", "content": "..."}]
+)
+```
+
+Use this pattern when building `src/llm.py`. Same key, same base URL, just a different endpoint and the openai SDK.
+
+### 7.5 Other things to know
+
+- **Hong Kong user + OpenAI = need VPN.** Don't suggest OpenAI as a default fallback for Patrick. Use MiniMax, DeepSeek, or another Chinese provider.
+- **API key is for a Chinese product.** Sometimes the dashboard gives a "login fail" error if the key doesn't have the right product enabled (e.g. you have chat access but not embedding access). Check the dashboard for the right product.
+- **Rate limits:** unspecified but our batched approach (96 chunks/request) seems to work fine for our scale. If you hit 429s, lower the batch size in `src/embed.py::embed_texts()`.
+
+---
+
+## 8. Step-by-step plan to complete the project
+
+### Step 3 — CLI Q&A + LLM client (estimated: 2-3 hours)
+
+**Files to create:**
+1. `src/llm.py` — chat completions client for MiniMax M3 (uses openai SDK, OpenAI-compatible). Function signature:
+   ```python
+   def chat(messages: List[dict], model: str = None) -> str:
+       """Send messages, return response text."""
+   ```
+2. `src/prompts.py` — system prompt + 3-4 use-case templates:
+   - `SYSTEM_PROMPT` — the auditor's assistant persona + citation format
+   - `format_audit_planning(question, chunks)` — for "list audits + frequency" questions
+   - `format_control_extraction(question, chunks)` — for "what controls are expected" questions
+   - `format_general(question, chunks)` — for free-form questions
+3. `src/ask.py` — CLI entry point: `python -m src.ask "your question"` → print answer + citations
+
+**Test questions to validate:**
+1. "What is the required audit frequency for AML compliance?" (should cite GL3)
+2. "List all required audits and their frequency from the IA guidelines." (planning use case)
+3. "What controls are expected for customer due diligence on politically exposed persons?" (execution use case)
+4. "Compare the underwriting requirements in GL15 and GL16." (cross-guideline)
+
+### Step 4 — LLM evaluation (estimated: 1-2 hours)
+
+Create `src/eval.py`:
+- 10 hand-written questions with ground-truth answers (Patrick provides these or agent writes them based on the PDF content)
+- Run each question through the LLM
+- Score: factual accuracy, citation accuracy, hallucination
+- Output: a comparison table
+
+**Goal:** confirm MiniMax M3 is good enough before building the UI on top.
+
+### Step 5 — Streamlit UI (estimated: 2-3 hours)
+
+Create `src/app.py`:
+- Chat input box
+- Display answer with collapsible "Sources" section per citation
+- 3-4 prompt template buttons ("Audit planning", "Control extraction", "Cross-guideline", "Free form")
+- Sidebar showing recent queries from `query_log` table
+- Download-as-Excel button for tabular answers
+- "View source PDF" link per chunk (uses `data/pdfs/IA/...pdf#page=N`)
+
+**Run:** `cd /Users/patrickshi/Documents/Minimax\ Coding/RegulatoryCompliance && .venv/bin/streamlit run src/app.py`
+
+**Deployment:** for the audit team to share access, deploy to a $5-10/mo Hetzner or DigitalOcean VM. Single command: `streamlit run --server.address 0.0.0.0 --server.port 8501`. Not needed yet — wait until the team is actively using it.
+
+---
+
+## 9. Known issues / TODO list
+
+| Issue | Severity | Notes |
+|---|---|---|
+| GL1, GL2, GL7 (repealed) not ingested | Low | Intentional. Can add as stub rows if Patrick wants |
+| GL15 sub-doc Word file not downloaded | Low | The IA HK page has a `.docx` link. Would need python-docx to extract text |
+| Section detection regex misses some formats | Medium | Easy fix: expand `_SECTION_PATTERNS` in `embed.py` if Patrick finds misses |
+| No `crawl --changed-only` mode | Low | Re-running takes 3 min currently, fine for now |
+| No scheduled refresh | Low | Patrick can run `python -m src.crawl` monthly, or we add a cron |
+| No SFC / HKMA support | Out of scope | Original plan deferred this to "later" |
+| `.docx` not supported | Low | Add `python-docx` if needed |
+| No authentication on Streamlit | Low | Add basic auth or deploy behind VPN if needed |
+| No streaming in CLI output | Cosmetic | Print answer all at once is fine for now |
+
+---
+
+## 10. Where to find what
+
+- **Code:** https://github.com/timetochilltoo/regcompliance
+- **Project root:** `/Users/patrickshi/Documents/Minimax Coding/RegulatoryCompliance/`
+- **Downloaded PDFs:** `data/pdfs/IA/` (29 MB, 62 files)
+- **SQLite database:** `data/regulatory.db` (29 MB, single file)
+- **Query audit log:** SQLite `query_log` table (empty until CLI Q&A is built)
+- **Crawl logs:** `logs/crawl.log`
+- **Step reports:** `reports/step1_findings.md`, `reports/step2_findings.md`
+- **This spec:** `docs/PROJECT_SPEC.md` (or wherever it's saved)
+
+---
+
+## 11. Contact / handoff notes
+
+**Original spec source:** Patrick walked me through the requirements verbally. The full design discussion is in conversation history, but the key points are:
+- Hong Kong-based internal audit team
+- Budget: very low (~$5-20/mo LLM cost)
+- Initial scope: IA HK guidelines only (extend to SFC/HKMA later)
+- Use cases: audit planning (list required audits + frequency) and audit execution (control extraction)
+- Strong preference for detailed specs before implementation
+- User explicitly wants to be asked before cutting features, not assumed
+- The hybrid retrieval architecture was Patrick's idea — keep it, don't simplify
+
+**If you're a new agent and you need to ask Patrick something:** he responds well to direct questions with concrete options. He doesn't want technical jargon. He values "give me a recommendation, not a buffet." He has a Galaxy S24 Ultra and lives in Hong Kong (UTC+8).
+
+**If something is unclear:** read the conversation history in this project's git commit messages — they explain the why, not just the what.
+
+**If you break something:** the git history is clean. Every commit is small and self-contained. `git log --oneline` to see the progression, `git revert <commit>` to undo safely.
+
+---
+
+*End of spec. Last updated: 2026-06-12, after Step 2 (database + embeddings + hybrid retrieval) completion. Next agent: continue from Step 3 (CLI Q&A).*
